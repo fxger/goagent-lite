@@ -367,8 +367,16 @@ func TestCancelQueuedTask(t *testing.T) {
 	if resp2.StatusCode != 200 || body["status"] != "CANCELLED" {
 		t.Fatalf("cancel = %d %v", resp2.StatusCode, body)
 	}
-	if got := readSSE(t, resp.Body, 2*time.Second); len(got) != 0 {
-		t.Fatalf("cancelled queued task produced events: %v", got)
+	got := readSSE(t, resp.Body, 2*time.Second)
+	if len(got) != 1 {
+		t.Fatalf("cancelled queued task events = %v, want exactly one terminal event", got)
+	}
+	if got[0]["type"] != "failed" {
+		t.Fatalf("terminal event = %v", got[0])
+	}
+	payload, _ := got[0]["payload"].(map[string]any)
+	if payload["error_code"] != agent.ErrCodeTaskCancelled {
+		t.Fatalf("terminal payload = %v", payload)
 	}
 	view := h.waitStatus(second, task.StatusCancelled, time.Second)
 	if view["error_code"] != agent.ErrCodeTaskCancelled {
@@ -518,5 +526,91 @@ func TestMetricsAndHealth(t *testing.T) {
 	}
 	if m["goroutines"].(float64) < 3 {
 		t.Fatalf("goroutines = %v", m["goroutines"])
+	}
+}
+
+func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func (h *harness) agentStat(t *testing.T, key string) map[string]any {
+	t.Helper()
+	_, body := h.get("/metrics")
+	queues, _ := body["queues"].(map[string]any)
+	agents, _ := queues["agents"].([]any)
+	for _, a := range agents {
+		stat, _ := a.(map[string]any)
+		if stat["key"] == key {
+			return stat
+		}
+	}
+	t.Fatalf("agent %s missing from /metrics", key)
+	return nil
+}
+
+// TestBatchCancelReleasesQuota covers the spec requirement "取消后配额即时释放":
+// cancelling a batch mid-load must return the agent semaphore immediately, so
+// the next burst reaches full concurrency again.
+func TestBatchCancelReleasesQuota(t *testing.T) {
+	const (
+		concurrency = 3
+		batch       = 12
+	)
+	blocker := newBlockingAdapter()
+	h := newHarness(t, harnessOptions{globalWorkers: 8, globalQueue: 32, defs: []agent.Definition{{
+		ID: "quota", Version: "v1", Protocol: "local", Enabled: true,
+		MaxConcurrency: concurrency, QueueCapacity: 20, TimeoutSeconds: 10, Adapter: blocker,
+	}}})
+
+	ids := make([]string, 0, batch)
+	for i := 0; i < batch; i++ {
+		id, code := h.submit("quota", `{}`)
+		if code != http.StatusCreated {
+			t.Fatalf("submit %d = %d", i, code)
+		}
+		ids = append(ids, id)
+	}
+	waitFor(t, 2*time.Second, "full concurrency", func() bool {
+		return blocker.running.Load() == concurrency
+	})
+	if stat := h.agentStat(t, "quota@v1"); stat["queued"].(float64) != batch-concurrency {
+		t.Fatalf("queued = %v, want %d", stat["queued"], batch-concurrency)
+	}
+
+	for _, id := range ids {
+		h.post("/api/v1/tasks/"+id+"/cancel", nil)
+	}
+	for _, id := range ids {
+		h.waitStatus(id, task.StatusCancelled, 5*time.Second)
+	}
+	waitFor(t, 2*time.Second, "adapters to stop", func() bool { return blocker.running.Load() == 0 })
+	waitFor(t, 2*time.Second, "gauges to drain", func() bool {
+		stat := h.agentStat(t, "quota@v1")
+		return stat["running"].(float64) == 0 && stat["queued"].(float64) == 0
+	})
+
+	second := make([]string, 0, concurrency)
+	for i := 0; i < concurrency; i++ {
+		id, code := h.submit("quota", `{}`)
+		if code != http.StatusCreated {
+			t.Fatalf("post-cancel submit %d = %d", i, code)
+		}
+		second = append(second, id)
+	}
+	waitFor(t, 2*time.Second, "quota to be reusable", func() bool {
+		return blocker.running.Load() == concurrency
+	})
+	for _, id := range second {
+		h.post("/api/v1/tasks/"+id+"/cancel", nil)
 	}
 }

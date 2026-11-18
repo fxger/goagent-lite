@@ -336,8 +336,9 @@ func TestLoad(t *testing.T) {
 			"peak":  peakGoroutines.Load(),
 			"final": runtime.NumGoroutine(),
 			// One worker goroutine per task, one executor event pump and one
-			// adapter goroutine per running task.
-			"formula_expected_at_peak": workers + workers + agentConcurrency + 50,
+			// adapter goroutine per running task. Fixed HTTP/runtime overhead
+			// (~9 goroutines) is measured on top of this model, not baked in.
+			"formula_expected_at_peak": workers + workers + agentConcurrency,
 		},
 		MemoryBytes: map[string]any{"peak_heap_alloc": peakHeap.Load()},
 		CPU: map[string]any{

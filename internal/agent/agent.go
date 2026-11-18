@@ -74,6 +74,30 @@ func IsTerminalEvent(t string) bool {
 	return t == EventCompleted || t == EventFailed
 }
 
+// FailurePayload renders the payload of a failed terminal event.
+func FailurePayload(code, message string) json.RawMessage {
+	payload := map[string]string{"error_code": code}
+	if message != "" {
+		payload["message"] = message
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return json.RawMessage(`{"error_code":"internal_panic"}`)
+	}
+	return b
+}
+
+// TerminalFailure builds a failed terminal event.
+//
+// The gateway uses it when it ends a task on its own — cancellation, timeout,
+// start failure, truncated stream, panic — so SSE subscribers always observe a
+// terminal signal instead of a stream that simply stops. The task's real state
+// remains authoritative through GET /api/v1/tasks/{id}; the event type is only
+// the stream terminator, and error_code carries the actual cause.
+func TerminalFailure(code, message string) AgentEvent {
+	return AgentEvent{Type: EventFailed, Payload: FailurePayload(code, message)}
+}
+
 // AgentAdapter is the single extension point for agent integrations.
 //
 // Contract:

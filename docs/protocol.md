@@ -97,11 +97,25 @@ SSE 注释行（以 `:` 开头）与空行被忽略；其他非 `data:` 行被�
 4. 收到终态事件后网关即结束消费并关闭连接，不再读取后续字节。
 5. `error` 是中间事件：收到后流继续，任务不终止；Agent 若最终失败，必须在流末发送 `failed`。
 
+### 3.4 网关补发的终态事件
+
+网关自身终止任务时（用户取消、超时、启动失败、流中断、panic），会在关闭事件流前向**订阅者**补发一条 `failed` 事件，`payload.error_code` 给出真实原因：
+
+| 场景 | `error_code` |
+|---|---|
+| 用户取消 RUNNING / QUEUED 任务 | `task_cancelled` |
+| 网关优雅关闭 | `gateway_shutdown` |
+| 超过 `timeout_seconds` | `agent_timeout` |
+| 连接失败 / 拒绝、HTTP 非 200 | `agent_unavailable` / `agent_error` |
+| 流中断、协议违规 | `agent_stream_interrupted` / `agent_protocol_violation` |
+
+这条事件由网关生成，不是 Agent 发出的，所以 Agent 不需要、也不应该在取消时补发终态事件（见 §4）。它只表示事件流终结：任务真实状态以 `GET /api/v1/tasks/{id}` 为准，`CANCELLED`、`TIMEOUT` 不会因为事件类型叫 `failed` 而改变；`completed` 仍然只有 Agent 能发出。
+
 ## 4. 取消与超时
 
 - **取消 = 网关断开连接**。没有显式 cancel 接口。Agent 必须监听请求的 `Context().Done()`（`r.Context()`），在客户端断开后立即停止计算、停止写流并释放资源。
 - 网关在以下情况断开连接：用户取消 RUNNING 任务、`timeout_seconds` 到期、网关优雅关闭。
-- Agent 无需在取消时补发终态事件；网关按自己的取消/超时语义决定任务状态。若流因取消关闭且没有终态，任务不会被误判为 `agent_stream_interrupted`。
+- Agent 无需在取消时补发终态事件；网关按自己的取消/超时语义决定任务状态，并向订阅者补发 §3.4 所述的 `failed` 事件。若流因取消关闭且没有终态，任务不会被误判为 `agent_stream_interrupted`。
 - 连接建立后应尽快（亚秒级）返回 `200` 并开始输出；建连与首字节延迟受网关任务超时约束。
 
 ## 5. 错误映射

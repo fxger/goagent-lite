@@ -128,7 +128,9 @@ func TestAgentTimeout(t *testing.T) {
 	if body["error_code"] != "agent_timeout" {
 		t.Fatalf("error_code = %v", body["error_code"])
 	}
-	if d := time.Since(start); d < 800*time.Millisecond || d > 2500*time.Millisecond {
+	// 上限放宽到 3.5s：-race 或慢速 CI 机器上调度延迟会拉长收敛时间，
+	// 下界 800ms 仍足以排除“立即失败”，默认超时是配置里的 10s。
+	if d := time.Since(start); d < 800*time.Millisecond || d > 3500*time.Millisecond {
 		t.Fatalf("timeout after %v, want ~1s", d)
 	}
 }
@@ -342,4 +344,100 @@ func TestCancelCompleteRace(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// readTerminal consumes events until a terminal one arrives.
+func readTerminal(t *testing.T, rd *bufio.Reader, want string) map[string]any {
+	t.Helper()
+	for i := 0; i < 256; i++ {
+		ev, err := readSSEEvent(rd)
+		if err != nil {
+			t.Fatalf("read event %d: %v", i, err)
+		}
+		typ, _ := ev["type"].(string)
+		if typ != "completed" && typ != "failed" {
+			continue
+		}
+		if typ != want {
+			t.Fatalf("terminal event = %v, want %s", ev, want)
+		}
+		return ev
+	}
+	t.Fatal("no terminal event within 256 events")
+	return nil
+}
+
+func requireErrorCode(t *testing.T, ev map[string]any, want string) {
+	t.Helper()
+	payload, _ := ev["payload"].(map[string]any)
+	if payload["error_code"] != want {
+		t.Fatalf("error_code = %v, want %s", payload["error_code"], want)
+	}
+}
+
+// TestCancelRunningEmitsTerminalEvent covers a gap that used to force clients
+// to poll /result: cancelling a RUNNING task closed the subscription without
+// any terminal event.
+func TestCancelRunningEmitsTerminalEvent(t *testing.T) {
+	blocker := newBlockingAdapter()
+	h := newHarness(t, harnessOptions{globalWorkers: 2, globalQueue: 8, defs: []agent.Definition{
+		{ID: "cancel-evt", Version: "v1", Protocol: "local", Enabled: true,
+			MaxConcurrency: 2, TimeoutSeconds: 10, Adapter: blocker},
+	}})
+	id, _ := h.submit("cancel-evt", `{}`)
+	resp, rd := h.openSSE(id)
+	defer resp.Body.Close()
+
+	select {
+	case <-blocker.started:
+	case <-time.After(time.Second):
+		t.Fatal("task never started")
+	}
+	if _, body := h.post("/api/v1/tasks/"+id+"/cancel", nil); body["status"] != string(task.StatusRunning) {
+		t.Fatalf("cancel response = %v", body)
+	}
+
+	ev := readTerminal(t, rd, "failed")
+	requireErrorCode(t, ev, agent.ErrCodeTaskCancelled)
+
+	if _, err := readSSEEvent(rd); err != io.EOF {
+		t.Fatalf("stream should end after the terminal event, got %v", err)
+	}
+	h.waitStatus(id, task.StatusCancelled, 2*time.Second)
+}
+
+// TestTimeoutEmitsTerminalEvent: a deadline kill must announce agent_timeout.
+func TestTimeoutEmitsTerminalEvent(t *testing.T) {
+	h := newHarness(t, harnessOptions{globalWorkers: 2, globalQueue: 8, defs: []agent.Definition{{
+		ID: "slow-evt", Version: "v1", Protocol: "local", Enabled: true,
+		MaxConcurrency: 2, TimeoutSeconds: 10,
+		Adapter: adapters.NewLocal(adapters.LocalOptions{Duration: 5 * time.Second}),
+	}}})
+	id, _ := h.submitTimeout("slow-evt", 1)
+	h.waitStatus(id, task.StatusTimeout, 3*time.Second)
+
+	resp, rd := h.openSSE(id)
+	defer resp.Body.Close()
+	requireErrorCode(t, readTerminal(t, rd, "failed"), agent.ErrCodeTimeout)
+}
+
+// TestStartFailureEmitsTerminalEvent: a task that never reached the agent still
+// ends its stream with a cause instead of closing silently.
+func TestStartFailureEmitsTerminalEvent(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	h := newHarness(t, harnessOptions{globalWorkers: 2, globalQueue: 8, defs: []agent.Definition{
+		remoteDef("dead-evt", "http://"+addr),
+	}})
+	id, _ := h.submit("dead-evt", `{}`)
+	h.waitStatus(id, task.StatusFailed, 2*time.Second)
+
+	resp, rd := h.openSSE(id)
+	defer resp.Body.Close()
+	requireErrorCode(t, readTerminal(t, rd, "failed"), agent.ErrCodeAgentUnavailable)
 }

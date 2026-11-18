@@ -233,10 +233,31 @@ func TestCancelQueuedClosesEventStream(t *testing.T) {
 	if got.Status != StatusCancelled || got.ErrorCode != agent.ErrCodeTaskCancelled {
 		t.Fatalf("cancelled task = %+v", got)
 	}
+	// The subscriber must see a terminal event carrying the cause, then EOF.
+	select {
+	case ev, open := <-ch:
+		if !open {
+			t.Fatal("event stream closed without a terminal event")
+		}
+		if ev.Type != agent.EventFailed {
+			t.Fatalf("terminal event type = %q", ev.Type)
+		}
+		var payload struct {
+			ErrorCode string `json:"error_code"`
+		}
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			t.Fatalf("payload %s: %v", ev.Payload, err)
+		}
+		if payload.ErrorCode != agent.ErrCodeTaskCancelled {
+			t.Fatalf("error_code = %q", payload.ErrorCode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no terminal event for a cancelled QUEUED task")
+	}
 	select {
 	case _, open := <-ch:
 		if open {
-			t.Fatal("event stream should be closed")
+			t.Fatal("event stream should be closed after the terminal event")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("event stream was not closed")

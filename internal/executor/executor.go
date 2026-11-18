@@ -87,7 +87,7 @@ func (e *Executor) Execute(parent context.Context, t *task.Task) {
 	timeout := e.defaultTimeout
 	reg, ok := e.registry.Lookup(t.AgentID, t.AgentVersion)
 	if !ok {
-		e.finish(t.ID, task.StatusFailed, "agent_not_found", "agent disappeared from the registry", nil)
+		e.settle(t.ID, task.StatusFailed, "agent_not_found", "agent disappeared from the registry")
 		e.events.Close(t.ID)
 		return
 	}
@@ -108,7 +108,7 @@ func (e *Executor) Execute(parent context.Context, t *task.Task) {
 		if r := recover(); r != nil {
 			e.log.Error("executor panic", "task_id", t.ID, "panic", r, "stack", string(debug.Stack()))
 			e.metrics.Panics.Add(1)
-			e.finish(t.ID, task.StatusFailed, agent.ErrCodeInternalPanic, fmt.Sprintf("executor panic: %v", r), nil)
+			e.settle(t.ID, task.StatusFailed, agent.ErrCodeInternalPanic, fmt.Sprintf("executor panic: %v", r))
 			cancel()
 			if ch != nil {
 				drain(ch, 5*time.Second)
@@ -133,7 +133,7 @@ func (e *Executor) Execute(parent context.Context, t *task.Task) {
 		return
 	}
 	if ch == nil {
-		e.finish(t.ID, task.StatusFailed, agent.ErrCodeProtocolViolation, "adapter returned a nil event channel", nil)
+		e.settle(t.ID, task.StatusFailed, agent.ErrCodeProtocolViolation, "adapter returned a nil event channel")
 		return
 	}
 	e.runEventPump(ctx, t, ch, cancel)
@@ -164,18 +164,18 @@ func (e *Executor) runEventPump(ctx context.Context, t *task.Task, ch <-chan age
 func (e *Executor) handleStartError(ctx context.Context, t *task.Task, err error) {
 	switch {
 	case e.wasUserCancelled(t.ID):
-		e.finish(t.ID, task.StatusCancelled, agent.ErrCodeTaskCancelled, "task cancelled by client", nil)
+		e.settle(t.ID, task.StatusCancelled, agent.ErrCodeTaskCancelled, "task cancelled by client")
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		e.finish(t.ID, task.StatusTimeout, agent.ErrCodeTimeout, "task timed out before the agent started", nil)
+		e.settle(t.ID, task.StatusTimeout, agent.ErrCodeTimeout, "task timed out before the agent started")
 	case errors.Is(ctx.Err(), context.Canceled):
-		e.finish(t.ID, task.StatusCancelled, agent.ErrCodeGatewayShutdown, "task cancelled", nil)
+		e.settle(t.ID, task.StatusCancelled, agent.ErrCodeGatewayShutdown, "task cancelled")
 	default:
 		code, msg := agent.ErrCodeAgentUnavailable, err.Error()
 		if ae, ok := agent.AsError(err); ok {
 			code, msg = ae.Code, ae.Message
 		}
 		e.metrics.StartFailures.Add(1)
-		e.finish(t.ID, task.StatusFailed, code, msg, nil)
+		e.settle(t.ID, task.StatusFailed, code, msg)
 	}
 }
 
@@ -212,16 +212,17 @@ func (e *Executor) consume(ctx context.Context, t *task.Task, ch <-chan agent.Ag
 		return
 	}
 
-	// The stream closed without a terminal event: decide why.
+	// The stream closed without a terminal event: decide why, then make sure
+	// subscribers still get a terminal signal.
 	switch {
 	case e.wasUserCancelled(t.ID):
-		e.finish(t.ID, task.StatusCancelled, agent.ErrCodeTaskCancelled, "task cancelled by client", nil)
+		e.settle(t.ID, task.StatusCancelled, agent.ErrCodeTaskCancelled, "task cancelled by client")
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		e.finish(t.ID, task.StatusTimeout, agent.ErrCodeTimeout, "task exceeded its execution timeout", nil)
+		e.settle(t.ID, task.StatusTimeout, agent.ErrCodeTimeout, "task exceeded its execution timeout")
 	case errors.Is(ctx.Err(), context.Canceled):
-		e.finish(t.ID, task.StatusCancelled, agent.ErrCodeGatewayShutdown, "task context cancelled", nil)
+		e.settle(t.ID, task.StatusCancelled, agent.ErrCodeGatewayShutdown, "task context cancelled")
 	default:
-		e.finish(t.ID, task.StatusFailed, agent.ErrCodeStreamInterrupted, "agent closed the stream without a terminal event", nil)
+		e.settle(t.ID, task.StatusFailed, agent.ErrCodeStreamInterrupted, "agent closed the stream without a terminal event")
 	}
 }
 
@@ -262,6 +263,22 @@ func (e *Executor) finish(taskID string, status task.Status, code, message strin
 	return true
 }
 
+// settle moves a task to a terminal state and, when this call wins the CAS,
+// publishes a failed terminal event for subscribers.
+//
+// It is the counterpart of the agent-provided terminal event: cancel, timeout,
+// start failure, truncated stream and panic all end a task without the agent
+// ever sending completed/failed. Without this, subscribers of those tasks saw a
+// stream that simply closed and had to poll /result to learn the outcome.
+func (e *Executor) settle(taskID string, status task.Status, code, message string) bool {
+	if !e.finish(taskID, status, code, message, nil) {
+		return false
+	}
+	e.events.Publish(taskID, agent.TerminalFailure(code, message))
+	e.metrics.EventsPublished.Add(1)
+	return true
+}
+
 // Cancel requests cancellation of a running task. It returns true because
 // cancellation is accepted asynchronously even if the task is not registered
 // yet (the request is remembered and applied when it starts).
@@ -295,7 +312,7 @@ func (e *Executor) CancelAll() {
 
 // Fail force-fails a task (used by worker panic recovery).
 func (e *Executor) Fail(taskID, code, message string) {
-	e.finish(taskID, task.StatusFailed, code, message, nil)
+	e.settle(taskID, task.StatusFailed, code, message)
 	e.events.Close(taskID)
 }
 

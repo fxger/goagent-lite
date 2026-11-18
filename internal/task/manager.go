@@ -224,7 +224,9 @@ func (m *Manager) Cancel(id string) (*Task, error) {
 			}
 			m.sched.MarkCancelled(id)
 			// A QUEUED task never reaches the executor, so nobody else will
-			// close its event stream; do it here so SSE subscribers end.
+			// publish its terminal event or close its stream; do both here so
+			// SSE subscribers end with a cause instead of a silent close.
+			m.publishTerminal(id, agent.ErrCodeTaskCancelled, "task cancelled while queued")
 			m.events.Close(id)
 		case StatusRunning:
 			m.canceller.Cancel(id) // accepted; terminal state converges asynchronously
@@ -236,6 +238,13 @@ func (m *Manager) Cancel(id string) (*Task, error) {
 		return out, nil
 	}
 	return nil, apierr.New(apierr.CodeTaskAlreadyFinished, "task finished while cancelling")
+}
+
+// publishTerminal gives subscribers of a task that will never reach the
+// executor a terminal event before its stream is closed.
+func (m *Manager) publishTerminal(taskID, code, message string) {
+	m.events.Publish(taskID, agent.TerminalFailure(code, message))
+	m.metrics.EventsPublished.Add(1)
 }
 
 // Subscribe opens an SSE subscription: history first, then live events.
@@ -313,6 +322,7 @@ func (m *Manager) Shutdown(ctx context.Context) {
 			x.ErrorMessage = "gateway shut down before the task started"
 		}); err == nil {
 			m.sched.MarkCancelled(t.ID)
+			m.publishTerminal(t.ID, agent.ErrCodeGatewayShutdown, "gateway shut down before the task started")
 			m.events.Close(t.ID)
 		}
 	}
