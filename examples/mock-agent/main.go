@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -31,6 +32,32 @@ type options struct {
 	failRate      float64
 	mode          string
 	seed          int64
+
+	// rng is guarded by mu: math/rand.Rand is not safe for concurrent use and
+	// handlers run on many connections at once.
+	mu  sync.Mutex
+	rng *rand.Rand
+}
+
+// jitter returns a pseudo-random offset in [0, max-min). It is deterministic
+// for a given -seed, which is what makes failure injection reproducible.
+func (o *options) jitter() time.Duration {
+	if o.maxDuration <= o.minDuration {
+		return 0
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return time.Duration(o.rng.Int63n(int64(o.maxDuration - o.minDuration)))
+}
+
+// shouldFail reports whether this run must end with a failed terminal event.
+func (o *options) shouldFail() bool {
+	if o.failRate <= 0 {
+		return false
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.rng.Float64() < o.failRate
 }
 
 func main() {
@@ -51,7 +78,7 @@ func main() {
 	if o.failRate < 0 || o.failRate > 1 {
 		log.Fatalf("fail-rate must be in [0,1]")
 	}
-	rand.New(rand.NewSource(o.seed))
+	o.rng = rand.New(rand.NewSource(o.seed))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/execute", func(w http.ResponseWriter, r *http.Request) {
@@ -154,10 +181,7 @@ func handleExecute(w http.ResponseWriter, r *http.Request, o *options) {
 		panic("mock agent simulated panic")
 	}
 
-	duration := o.minDuration
-	if o.maxDuration > o.minDuration {
-		duration += time.Duration(rand.Int63n(int64(o.maxDuration - o.minDuration)))
-	}
+	duration := o.minDuration + o.jitter()
 	if o.mode == "hang" {
 		duration = time.Hour
 	}
@@ -177,7 +201,7 @@ func handleExecute(w http.ResponseWriter, r *http.Request, o *options) {
 		// Gateway disconnected (cancel or timeout): stop working immediately.
 		return
 	}
-	if o.failRate > 0 && rand.Float64() < o.failRate {
+	if o.shouldFail() {
 		payload, _ := json.Marshal(map[string]string{
 			"error_code": "mock_agent_failure",
 			"message":    "mock agent simulated a failure",
