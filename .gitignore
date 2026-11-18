@@ -1,0 +1,15 @@
+bin/
+coverage.out
+*.exe
+*.test
+.env
+
+# 编辑器与本地配置
+.vscode/
+.idea/
+*.swp
+
+# 本地运行产物
+*.log
+*.prof
+*.pprof

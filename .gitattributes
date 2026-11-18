@@ -1,0 +1,7 @@
+# 统一 LF：Windows 检出后不改写行尾，避免 shell 脚本与 Docker 构建失效
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.pdf binary

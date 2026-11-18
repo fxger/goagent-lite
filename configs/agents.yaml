@@ -1,0 +1,54 @@
+# goagent-lite example configuration.
+# Every field is validated at startup; an invalid file aborts the process.
+gateway:
+  listen_addr: ":8080"
+  max_concurrency: 500          # global RUNNING limit = number of workers
+  queue_capacity: 1000          # total QUEUED limit across all agent queues
+  default_timeout_seconds: 120  # covers RUNNING only, not queueing
+  shutdown_deadline_seconds: 30
+  max_request_body_bytes: 1048576
+  sse_heartbeat_seconds: 15
+  sse_subscriber_buffer: 64
+  event_retention_minutes: 10
+  enable_pprof: false           # /debug/pprof only when true
+  log_level: info
+
+agents:
+  # In-process mock agent: no network, used for local development and tests.
+  - id: local-mock
+    version: v1
+    protocol: local
+    max_concurrency: 100
+    queue_capacity: 200
+    timeout_seconds: 60
+    mock:
+      duration_ms: 250
+      jitter_ms: 250
+      fail_rate: 0.0
+      panic_rate: 0.0
+      tokens: 5
+      token_interval_ms: 20
+      failure_code: mock_failure
+      failure_message: local mock agent failed
+
+  # Remote agents implementing docs/protocol.md. Start the reference
+  # implementation before submitting tasks:
+  #   go run ./examples/mock-agent -addr :9101
+  #   go run ./examples/mock-agent -addr :9102 -fail-rate 0.1
+  - id: remote-mock-a
+    version: v1
+    protocol: http
+    endpoint: http://127.0.0.1:9101
+    max_concurrency: 200
+    queue_capacity: 400
+    timeout_seconds: 30
+    enabled: true
+
+  - id: remote-mock-b
+    version: v1
+    protocol: http
+    endpoint: http://127.0.0.1:9102
+    max_concurrency: 200
+    queue_capacity: 400
+    timeout_seconds: 30
+    enabled: true
