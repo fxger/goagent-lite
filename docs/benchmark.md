@@ -13,7 +13,7 @@
 - 500 并发以内，排队时间 p99 ≤ 0.6ms，端到端延迟几乎等于 Agent 执行时长；
   800/1000 任务时排队 p95 约 0.89s/1.32s，符合“500 个并发槽 + 有界队列”的预期。
 - goroutine 峰值 = Worker 数 + 每个运行中任务的 Executor 事件泵 + Adapter goroutine + HTTP 服务少量固定开销，
-  实测 500 并发时为 **1508–1509**（≈3×500+9），任务结束后回落到 714–765，无泄漏（goleak 通过）。
+  实测 500 并发时为 **1508–1509**（模型 `3×500`，另有约 9 个 HTTP/运行时固定开销），任务结束后回落到 714–765，无泄漏（goleak 通过）。
 - 网关自身 CPU 开销很低：500 并发下进程 CPU 约 0.44s（2.22s 墙钟，约单核 20%），
   因为 mock Agent 的耗时是 `time.Sleep` 而非忙等；堆峰值 < 10MB。
 
@@ -89,14 +89,16 @@
 
 ### 6.3 goroutine 账目
 
-每个 RUNNING 任务固定占用 3 个 goroutine：Worker、Executor 事件泵、Adapter 内部 goroutine，
-另有 HTTP 服务固定开销。因此峰值约为 `workers×2 + 运行中任务数 + ~9`：
+每个 RUNNING 任务固定占用 3 个 goroutine：Worker、Executor 事件泵、Adapter 内部 goroutine。
+压测跑满时 RUNNING 数等于 Worker 数，因此模型就是 `3×workers = workers×2 + agentConcurrency`
+（压测输出中的 `formula_expected_at_peak` 即此值）；实测比模型多出的约 9 个 goroutine 属于
+HTTP 服务与运行时固定开销，不进入模型。
 
-| Worker | 理论峰值（≈3×workers+9） | 实测峰值 | 结束后 |
+| Worker | 理论模型（3×workers） | 实测峰值（含 ~9 固定开销） | 结束后 |
 |---:|---:|---:|---:|
-| 100 | ~309 | 308 | 332 |
-| 300 | ~909 | 909 | 523 |
-| 500 | ~1509 | 1508–1509 | 714–765 |
+| 100 | 300 | 308 | 332 |
+| 300 | 900 | 909 | 523 |
+| 500 | 1500 | 1508–1509 | 714–765 |
 
 提交端与轮询端复用 keep-alive 连接，因此结束后 goroutine 数（523–765）高于 Worker 数，
 但会随空闲连接回收而下降；`go.uber.org/goleak` 在所有测试结束时未发现泄漏。压测同时断言
