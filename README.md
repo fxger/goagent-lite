@@ -66,7 +66,7 @@ curl -s -X POST http://127.0.0.1:8080/api/v1/tasks \
 | POST | `/api/v1/tasks` | 提交任务，返回 `201 {task_id,status}` |
 | GET | `/api/v1/tasks/{id}` | 查询任务状态、耗时、错误 |
 | GET | `/api/v1/tasks/{id}/result` | 最终结果（`completed` 的 payload）；无结果时 `null` |
-| GET | `/api/v1/tasks/{id}/events` | SSE：先回放历史，再实时推送；终态后服务端关闭 |
+| GET | `/api/v1/tasks/{id}/events` | SSE：先回放历史，再实时推送；终态后服务端关闭（取消/超时/启动失败时网关补发 `failed` 事件） |
 | POST | `/api/v1/tasks/{id}/cancel` | 取消任务 |
 | GET | `/health` | 健康检查（过载时仍可用） |
 | GET | `/metrics` | 轻量 JSON 指标 |
@@ -107,6 +107,8 @@ curl -s -X POST http://127.0.0.1:8080/api/v1/tasks \
 | `INTERNAL_ERROR` | 500 | 未分类内部错误 |
 
 任务状态：`QUEUED → RUNNING → SUCCEEDED / FAILED / TIMEOUT / CANCELLED`，终态只能进入一次。取消 `QUEUED` 任务立即生效；取消 `RUNNING` 任务返回受理语义（无 `CANCELLING` 状态），实际终止通过任务 ctx 传播。
+
+无论任务怎么结束，事件流最后都以一条终态事件收尾：Agent 正常结束发 `completed`/`failed`；网关主动终止（取消、超时、启动失败、流中断）则补发 `failed`，`payload.error_code` 说明原因。任务的真实状态以 `GET /api/v1/tasks/{id}` 为准。
 
 SSE 事件格式：
 

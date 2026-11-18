@@ -135,6 +135,7 @@ Worker 数在启动时固定为 `gateway.max_concurrency`。每个 Worker 同一
    - 超时 → `TIMEOUT(agent_timeout)`
    - 网关关闭 → `CANCELLED(gateway_shutdown)`
    - 其他 → `FAILED(agent_stream_interrupted)`
+   - 以上四条与启动失败、panic 一样，由 `Executor.settle` 在 CAS 成功后**补发一条 `failed` 终态事件**（`payload.error_code` 表达真实原因），随后关闭事件流；否则订阅方只能看到连接被关闭，必须轮询 `/result` 才能知道结果。取消排队任务由 Manager 补发，因为该任务从不到达 Executor。
 7. 只有 CAS 成功的路径计数指标，保证“终态只出现一次”；
 8. 顶层 `recover` 兜底：任务 `FAILED(internal_panic)`，取消 ctx，排空并关闭事件流。
 
