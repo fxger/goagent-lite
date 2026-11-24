@@ -132,8 +132,7 @@ GOAGENT_BENCH=1 BENCH_TASKS=500 BENCH_WORKERS=500 \
 ```
 
 输出中 `BENCHMARK_REPORT_BEGIN ... END` 之间是完整 JSON 报告，包含所有分位值、
-`status_counts`、goroutine/内存/CPU 字段。原始输出保存在开发机的
-`D:\Desktop\gateway\tools\bench{100,300,500,800,1000}e.txt`（不随仓库交付）。
+`status_counts`、goroutine/内存/CPU 字段。原始输出仅保留在开发机本地，不随仓库交付。
 
 ## 8. 局限
 
